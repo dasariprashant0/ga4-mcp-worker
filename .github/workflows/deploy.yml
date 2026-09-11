@@ -1,0 +1,61 @@
+# Deploy ga4-mcp-worker to Cloudflare.
+#
+# Typecheck and a bundle dry-run must pass before anything deploys. This repo
+# has no unit tests; if that changes, add them to the verify job so they gate
+# the deploy too.
+#
+# Requires one repository secret: CLOUDFLARE_API_TOKEN
+#   Cloudflare dashboard -> My Profile -> API Tokens -> Create Token
+#   -> "Edit Cloudflare Workers" template, scoped to this account.
+#   Then: gh secret set CLOUDFLARE_API_TOKEN --repo dasariprashant0/ga4-mcp-worker
+#
+# The same token works for both this repo and gtm-mcp-worker.
+
+name: Verify and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Bundle (dry run)
+        run: npm run dry-run
+
+  deploy:
+    name: Deploy
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: deploy --env=""
+      - name: Confirm the deployed Worker is healthy
+        run: |
+          sleep 5
+          curl -sSf https://ga4-mcp-worker.YOUR-SUBDOMAIN.workers.dev/health | tee /dev/stderr | grep -q '"status":"ok"'
