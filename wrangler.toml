@@ -48,6 +48,18 @@ new_sqlite_classes = ["GA4MCP"]
 binding = "OAUTH_KV"
 id = "00000000000000000000000000000000"
 
+# Analytics Engine: queryable time-series of tool calls. Workers Logs answers
+# "what happened in this incident"; this answers "who is using it, which tools
+# error most, how much GA4 quota are we burning".
+#
+# SHARED with gtm-mcp-worker, deliberately: one dataset, both servers, and
+# blob1 says which one wrote each row. src/analytics.ts documents the
+# POSITIONAL schema — a slot must mean the same thing in both repos, so append
+# only, and append in both.
+[[analytics_engine_datasets]]
+binding = "analytics_engine"
+dataset = "analytics_events"
+
 # Workers Logs — needed for `wrangler tail` history and for querying the JSON
 # log lines this Worker emits. See PRODUCTION.md § "Monitoring".
 #

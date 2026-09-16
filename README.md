@@ -125,6 +125,42 @@ or mutated.
 
 ---
 
+## Telemetry
+
+Every tool call writes a row to the **Analytics Engine** dataset `analytics_events`
+(binding `analytics_engine`). Workers Logs answers "what happened in this
+incident"; this answers "who is using it, which tools error most, how much GA4
+quota are we burning".
+
+The dataset is **shared with `gtm-mcp-worker`** — one dataset, both servers,
+with `blob1` naming which one wrote each row. The schema is positional
+(Analytics Engine has no column names), so a slot must mean the same thing in
+both repos: append new fields at the end in *both*, never repurpose one.
+[src/analytics.ts](src/analytics.ts) documents every slot; this Worker leaves
+the GTM-only slots empty.
+
+No Analytics data is recorded — no dimension values, no metric values, no report
+rows. Only which tool ran, by whom, and whether it worked. `blob5` does carry the
+signed-in user's email; swap it for `ctx.sub` in `analytics.ts` if you would
+rather it did not.
+
+```bash
+curl -s -X POST \
+  "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/analytics_engine/sql" \
+  -H "Authorization: Bearer <TOKEN>" \
+  --data "SELECT blob3 AS tool, blob4 AS outcome, blob13 AS error_kind, double1 AS ms
+          FROM analytics_events WHERE blob1 = 'ga4-mcp-worker' FORMAT JSON"
+```
+
+| Question | Query |
+|---|---|
+| Error rate per tool | `SELECT blob3, AVG(double2) FROM analytics_events WHERE blob1='ga4-mcp-worker' GROUP BY blob3` |
+| Who is using it | `SELECT blob5, count() FROM analytics_events GROUP BY blob5` |
+| GA4 quota pressure | `SELECT count() FROM analytics_events WHERE blob13='quota'` |
+| Both servers at once | `SELECT blob1, blob3, count() FROM analytics_events GROUP BY blob1, blob3` |
+
+---
+
 ## Quick commands
 
 ```bash

@@ -37,6 +37,7 @@ import { z } from "zod";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { createGoogleAuthHandler, type GoogleAuthProps } from "./google-oauth.js";
+import { recordToolCall } from "./analytics.js";
 
 // ===========================================================================
 // Environment
@@ -74,6 +75,13 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
   /** OAuth mode only. KV namespace holding encrypted grants. */
   OAUTH_KV: KVNamespace;
+  /**
+   * Analytics Engine dataset for tool telemetry, SHARED with gtm-mcp-worker.
+   * OPTIONAL on purpose: absent in local dev and on any deploy predating the
+   * binding, and a missing telemetry sink must never break a tool call.
+   * See src/analytics.ts for the (positional, cross-repo) schema.
+   */
+  analytics_engine?: AnalyticsEngineDataset;
   /** OAuth mode only, optional. Restrict sign-in to one domain, e.g. "example.com". */
   ALLOWED_EMAIL_DOMAIN?: string;
 
@@ -93,6 +101,12 @@ export interface Ga4Ctx {
   getToken: TokenFn;
   /** Present in OAuth mode only. For logging and attribution. */
   actor?: string;
+  /**
+   * Google's opaque subject for this user. OAuth mode only. Used as the
+   * Analytics Engine sampling index — opaque rather than the email, so the
+   * sampling key is not PII.
+   */
+  sub?: string;
 }
 
 const SERVER_NAME = "ga4-mcp-worker";
@@ -769,17 +783,32 @@ function ok(data: unknown): ToolResult {
  * back as readable text the model can correct from, rather than an exception
  * that tears down the MCP connection.
  */
-function guard(name: string, fn: () => Promise<unknown>): Promise<ToolResult> {
-  return fn()
-    .then(ok)
-    .catch((err: unknown) => {
-      const message = err instanceof Error ? err.message : String(err);
-      logJson({ event: "tool_error", tool: name, message: truncate(message, 500) });
-      return {
-        content: [{ type: "text" as const, text: `Tool '${name}' failed.\n\n${message}` }],
-        isError: true,
-      };
-    });
+/**
+ * Builds the wrapper every tool handler goes through.
+ *
+ * Bound to a ctx rather than free-standing, so each call is timed and recorded
+ * to Analytics Engine without all nine registrations having to remember to do
+ * it. init() opens with `const guard = makeGuard(ctx)`, which shadows nothing
+ * and leaves every call site unchanged.
+ */
+function makeGuard(ctx: Ga4Ctx) {
+  return function guard(name: string, fn: () => Promise<unknown>): Promise<ToolResult> {
+    const started = Date.now();
+    return fn()
+      .then((data) => {
+        recordToolCall(ctx, name, Date.now() - started);
+        return ok(data);
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        logJson({ event: "tool_error", tool: name, message: truncate(message, 500) });
+        recordToolCall(ctx, name, Date.now() - started, message);
+        return {
+          content: [{ type: "text" as const, text: `Tool '${name}' failed.\n\n${message}` }],
+          isError: true,
+        };
+      });
+  };
 }
 
 function logJson(fields: Record<string, unknown>): void {
@@ -982,8 +1011,11 @@ export class GA4MCP extends McpAgent<Env, unknown, GoogleAuthProps> {
     // fall back to the Worker's single refresh token.
     const props = this.props as GoogleAuthProps | undefined;
     const ctx: Ga4Ctx = props?.googleRefreshToken
-      ? { env, getToken: userTokenSource(env, props), actor: props.email || props.sub }
+      ? { env, getToken: userTokenSource(env, props), actor: props.email || props.sub, sub: props.sub }
       : { env, getToken: sharedTokenSource(env) };
+
+    // Every guard() below now times its tool call and records it.
+    const guard = makeGuard(ctx);
 
     logJson({
       event: "mcp_session_init",
